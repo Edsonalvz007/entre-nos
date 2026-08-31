@@ -1,6 +1,6 @@
-import { getDeckForMode } from '../content/decks';
-import { ACT_META, ADULT_MIN_INTENSITY, SESSION_CARDS } from '../types';
-import type { Card, Intensity, SessionConfig, SessionState } from '../types';
+import { getDeckForMode, getWildDeckForMode } from '../content/decks';
+import { ACT_META, ADULT_MIN_INTENSITY, SESSION_CARDS, WILDCARDS_PER_SESSION } from '../types';
+import type { Card, CardCategory, Intensity, SessionConfig, SessionState } from '../types';
 
 const intensityRank = { suave: 1, profunda: 2, intima: 3 } as const;
 
@@ -30,85 +30,159 @@ export const isAdultUnlocked = (config: Pick<SessionConfig, 'adultEnabled' | 'in
   config.adultEnabled && intensityRank[config.intensity] >= intensityRank[ADULT_MIN_INTENSITY];
 
 /** Elige posiciones al azar dentro de la sesión, nunca la primera carta. */
-const pickAdultSlots = (windowSize: number, count: number): Set<number> => {
+const pickSlots = (windowSize: number, count: number): Set<number> => {
   const candidates = Array.from({ length: Math.max(0, windowSize - 1) }, (_, index) => index + 1);
   return new Set(shuffle(candidates).slice(0, count));
 };
 
 /**
- * Reparte las cartas adultas en huecos aleatorios de la sesión en lugar de
+ * Intercala cartas especiales en huecos aleatorios de la sesión en lugar de
  * dejarlas al azar del barajado completo: así siempre aparecen, pero nunca
  * de forma predecible ni todas seguidas.
  */
-const mixAdultCards = (base: Card[], adult: Card[], intensity: Intensity, totalCards: number): Card[] => {
-  const windowSize = Math.min(totalCards, base.length + adult.length);
-  const target = Math.min(adult.length, Math.max(1, Math.round(windowSize * adultShare[intensity])));
-  const slots = pickAdultSlots(windowSize, target);
+const interleave = (base: Card[], extras: Card[], windowSize: number, count: number): Card[] => {
+  const size = Math.min(windowSize, base.length + extras.length);
+  const target = Math.min(extras.length, Math.max(1, count));
+  const slots = pickSlots(size, target);
 
   const session: Card[] = [];
   let baseIndex = 0;
-  let adultIndex = 0;
-  for (let position = 0; position < windowSize; position += 1) {
-    const takesAdult = (slots.has(position) || baseIndex >= base.length) && adultIndex < adult.length;
-    session.push(takesAdult ? adult[adultIndex++] : base[baseIndex++]);
+  let extraIndex = 0;
+  for (let position = 0; position < size; position += 1) {
+    const takesExtra = (slots.has(position) || baseIndex >= base.length) && extraIndex < extras.length;
+    session.push(takesExtra ? extras[extraIndex++] : base[baseIndex++]);
   }
 
-  return [...session, ...shuffle([...base.slice(baseIndex), ...adult.slice(adultIndex)])];
+  return [...session, ...shuffle([...base.slice(baseIndex), ...extras.slice(extraIndex)])];
 };
 
-const getFilteredDeck = (config: SessionConfig): Card[] => {
+/**
+ * Cada intensidad es un mazo cerrado: elegir "profunda" no arrastra las
+ * preguntas de "suave", así que ninguna carta se repite entre niveles.
+ */
+const buildSessionDeck = (config: SessionConfig): Card[] => {
   const pool = getDeckForMode(config.mode, config.adultEnabled);
-  const base = shuffle(
-    pool.filter((card) => !card.adult && intensityRank[card.intensity] <= intensityRank[config.intensity]),
-  );
-  if (!isAdultUnlocked(config)) return base;
+  let sequence = shuffle(pool.filter((card) => !card.adult && card.intensity === config.intensity));
 
-  const adult = shuffle(pool.filter((card) => card.adult));
-  if (adult.length === 0) return base;
-  return mixAdultCards(base, adult, config.intensity, SESSION_CARDS);
+  if (isAdultUnlocked(config)) {
+    const adult = shuffle(pool.filter((card) => card.adult));
+    if (adult.length > 0) {
+      sequence = interleave(sequence, adult, SESSION_CARDS, Math.round(SESSION_CARDS * adultShare[config.intensity]));
+    }
+  }
+
+  if (config.wildcardsEnabled) {
+    const wilds = shuffle(getWildDeckForMode(config.mode, config.adultEnabled)).slice(0, WILDCARDS_PER_SESSION);
+    if (wilds.length > 0) {
+      sequence = interleave(sequence, wilds, SESSION_CARDS + wilds.length, wilds.length);
+    }
+  }
+
+  return sequence;
 };
 
-export const createSession = (config: SessionConfig): SessionState => ({
-  status: 'active',
-  config: { ...config, totalCards: SESSION_CARDS },
-  deck: getFilteredDeck(config),
-  currentCard: null,
-  drawnIds: [],
-  answeredIds: [],
-  skippedIds: [],
-  cardsPlayed: 0,
-  turnIndex: 0,
-  actIndex: 0,
-  startedAt: new Date().toISOString(),
-});
+/**
+ * Reserva de cartas suaves para "algo más suave". Queda vacía en una sesión
+ * suave, porque ahí ya no hay un escalón más abajo al que bajar.
+ */
+const buildSoothingDeck = (config: SessionConfig, deck: Card[]): Card[] => {
+  if (config.intensity === 'suave') return [];
+  const used = new Set(deck.map((card) => card.id));
+  return shuffle(
+    getDeckForMode(config.mode, false).filter((card) => card.intensity === 'suave' && !used.has(card.id)),
+  );
+};
+
+export const createSession = (config: SessionConfig): SessionState => {
+  const deck = buildSessionDeck(config);
+  return {
+    status: 'active',
+    config: { ...config, totalCards: SESSION_CARDS },
+    deck,
+    soothingDeck: buildSoothingDeck(config, deck),
+    currentCard: null,
+    drawnIds: [],
+    answeredIds: [],
+    skippedIds: [],
+    cardsPlayed: 0,
+    turnIndex: 0,
+    direction: 1,
+    forcedCategory: null,
+    wildsPlayed: 0,
+    actIndex: 0,
+    startedAt: new Date().toISOString(),
+  };
+};
 
 export const drawNextCard = (state: SessionState): SessionState => {
   if (state.cardsPlayed >= state.config.totalCards || state.deck.length === 0) {
     return { ...state, currentCard: null, status: 'finished' };
   }
 
-  const [nextCard, ...remainingDeck] = state.deck;
+  // Un comodín de tema empuja al frente la primera carta de la categoría elegida.
+  let deck = state.deck;
+  if (state.forcedCategory) {
+    const wantedIndex = deck.findIndex((card) => card.category === state.forcedCategory && card.kind !== 'comodin');
+    if (wantedIndex > 0) {
+      const wanted = deck[wantedIndex];
+      deck = [wanted, ...deck.slice(0, wantedIndex), ...deck.slice(wantedIndex + 1)];
+    }
+  }
+
+  const [nextCard, ...remainingDeck] = deck;
   return {
     ...state,
     status: 'active',
     deck: remainingDeck,
     currentCard: nextCard,
+    forcedCategory: null,
     drawnIds: [...state.drawnIds, nextCard.id],
   };
 };
 
+/** Mueve el turno respetando el sentido actual de la ronda. */
+const stepTurn = (state: SessionState, steps: number): number => {
+  const count = state.config.players.length;
+  if (count === 0) return 0;
+  return (((state.turnIndex + state.direction * steps) % count) + count) % count;
+};
+
+/** Cuántos lugares avanza el turno después de cada comodín de mecánica. */
+const wildTurnSteps: Record<string, number> = { doble: 0, salta: 2 };
+
 export const answerCurrentCard = (state: SessionState): SessionState => {
-  if (!state.currentCard) return drawNextCard(state);
+  const card = state.currentCard;
+  if (!card) return drawNextCard(state);
+
+  // Los comodines no consumen una de las doce cartas: son un extra.
+  if (card.kind === 'comodin') {
+    const reversed = card.wild === 'reversa';
+    const direction = (reversed ? -state.direction : state.direction) as 1 | -1;
+    const withDirection = { ...state, direction };
+    return drawNextCard({
+      ...withDirection,
+      currentCard: null,
+      answeredIds: [...state.answeredIds, card.id],
+      wildsPlayed: state.wildsPlayed + 1,
+      turnIndex: stepTurn(withDirection, wildTurnSteps[card.wild ?? ''] ?? 1),
+    });
+  }
 
   const answeredCount = state.cardsPlayed + 1;
   return drawNextCard({
     ...state,
     currentCard: null,
-    answeredIds: [...state.answeredIds, state.currentCard.id],
+    answeredIds: [...state.answeredIds, card.id],
     cardsPlayed: answeredCount,
     actIndex: getActIndex(answeredCount),
-    turnIndex: (state.turnIndex + 1) % state.config.players.length,
+    turnIndex: stepTurn(state, 1),
   });
+};
+
+/** Resuelve un comodín de tema: la siguiente carta será de la categoría elegida. */
+export const chooseTheme = (state: SessionState, category: CardCategory): SessionState => {
+  if (!state.currentCard || state.currentCard.wild !== 'tema') return state;
+  return answerCurrentCard({ ...state, forcedCategory: category });
 };
 
 export const skipCard = (state: SessionState): SessionState => {
@@ -121,27 +195,35 @@ export const skipCard = (state: SessionState): SessionState => {
 };
 
 export const softenCurrentCard = (state: SessionState): SessionState => {
-  if (!state.currentCard) return state;
+  const card = state.currentCard;
+  if (!card) return state;
 
-  const currentRank = intensityRank[state.currentCard.intensity];
-  // Se busca primero la carta más suave posible: quien pide bajar el tono
-  // merece el escalón más bajo disponible, no solo uno menos.
-  const gentlestIndex = state.deck.findIndex((card) => card.intensity === 'suave' && !card.adult);
-  const softerIndex = state.deck.findIndex((card) => intensityRank[card.intensity] < currentRank && !card.adult);
-  const fallbackIndex = state.deck.findIndex((card) => !card.adult && card.id !== state.currentCard?.id);
-  const replacementIndex = gentlestIndex >= 0 ? gentlestIndex : softerIndex >= 0 ? softerIndex : fallbackIndex;
+  // Primero la reserva suave; si la sesión ya era suave, simplemente se cambia de carta.
+  const [softerCard, ...restSoothing] = state.soothingDeck;
+  if (softerCard) {
+    return {
+      ...state,
+      soothingDeck: restSoothing,
+      currentCard: softerCard,
+      drawnIds: [...state.drawnIds, softerCard.id],
+      skippedIds: [...state.skippedIds, card.id],
+    };
+  }
+
+  const replacementIndex = state.deck.findIndex(
+    (candidate) => !candidate.adult && candidate.kind !== 'comodin' && candidate.id !== card.id,
+  );
   if (replacementIndex < 0) return state;
 
-  const softerCard = state.deck[replacementIndex];
+  const replacement = state.deck[replacementIndex];
   const nextDeck = [...state.deck];
   nextDeck.splice(replacementIndex, 1);
-
   return {
     ...state,
     deck: nextDeck,
-    currentCard: softerCard,
-    drawnIds: [...state.drawnIds, softerCard.id],
-    skippedIds: [...state.skippedIds, state.currentCard.id],
+    currentCard: replacement,
+    drawnIds: [...state.drawnIds, replacement.id],
+    skippedIds: [...state.skippedIds, card.id],
   };
 };
 

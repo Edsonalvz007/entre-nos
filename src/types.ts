@@ -1,6 +1,12 @@
 export type GameMode = 'pareja' | 'amigos';
 export type Intensity = 'suave' | 'profunda' | 'intima';
-export type CardKind = 'pregunta' | 'reto' | 'frase';
+export type CardKind = 'pregunta' | 'reto' | 'frase' | 'comodin';
+
+/**
+ * Comodines. Los cuatro primeros alteran el flujo de la ronda (como en el UNO);
+ * los cuatro últimos son prendas con tono pícaro (como en el Drinkopoly).
+ */
+export type WildKind = 'reversa' | 'salta' | 'doble' | 'tema' | 'reto' | 'todos' | 'confesion' | 'brindis';
 export type CardCategory =
   | 'cercania'
   | 'presente'
@@ -25,6 +31,9 @@ export interface Card {
   prompt: string;
   followUp?: string;
   adult?: boolean;
+  wild?: WildKind;
+  /** Título corto del comodín, para la cara grande de la carta. */
+  title?: string;
 }
 
 export interface SessionConfig {
@@ -32,6 +41,7 @@ export interface SessionConfig {
   players: Player[];
   intensity: Intensity;
   adultEnabled: boolean;
+  wildcardsEnabled: boolean;
   totalCards: number;
 }
 
@@ -39,12 +49,19 @@ export interface SessionState {
   status: SessionStatus;
   config: SessionConfig;
   deck: Card[];
+  /** Cartas suaves de reserva para "algo más suave", fuera del mazo principal. */
+  soothingDeck: Card[];
   currentCard: Card | null;
   drawnIds: string[];
   answeredIds: string[];
   skippedIds: string[];
   cardsPlayed: number;
   turnIndex: number;
+  /** Sentido de la ronda: 1 avanza, -1 después de una Reversa. */
+  direction: 1 | -1;
+  /** Categoría exigida por un comodín de tema para la siguiente carta. */
+  forcedCategory: CardCategory | null;
+  wildsPlayed: number;
   actIndex: 0 | 1 | 2;
   startedAt: string;
 }
@@ -118,3 +135,17 @@ export const SESSION_CARDS = 12;
  * Con intensidad "suave" las cartas adultas se quedan fuera aunque estén activadas.
  */
 export const ADULT_MIN_INTENSITY: Intensity = 'profunda';
+
+/** Cuántos comodines se reparten en una sesión cuando el modo está activo. */
+export const WILDCARDS_PER_SESSION = 4;
+
+export const WILD_META: Record<WildKind, { label: string; symbol: string; color: string; family: 'mecanica' | 'prenda' }> = {
+  reversa: { label: 'Reversa', symbol: '⇄', color: '#cf8b45', family: 'mecanica' },
+  salta: { label: 'Salta', symbol: '⊘', color: '#63849a', family: 'mecanica' },
+  doble: { label: 'Doble', symbol: '+2', color: '#bd6457', family: 'mecanica' },
+  tema: { label: 'Cambio de tema', symbol: '◈', color: '#846d91', family: 'mecanica' },
+  reto: { label: 'Reto', symbol: '✦', color: '#bd6457', family: 'prenda' },
+  todos: { label: 'Todos', symbol: '◎', color: '#78986d', family: 'prenda' },
+  confesion: { label: 'Confesión', symbol: '✧', color: '#846d91', family: 'prenda' },
+  brindis: { label: 'Brindis', symbol: '△', color: '#d3ad4b', family: 'prenda' },
+};

@@ -1,6 +1,7 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
 import {
   answerCurrentCard,
+  chooseTheme,
   createSession,
   drawNextCard,
   finishSession,
@@ -12,6 +13,7 @@ import {
   softenCurrentCard,
 } from './lib/game-engine';
 import { loadSoundPreference, playSound, setSoundEnabled as setSoundPreference } from './lib/sound-effects';
+import type { SoundName } from './lib/sound-effects';
 import {
   clearAllLocalData,
   clearPausedSession,
@@ -26,8 +28,9 @@ import {
   INTENSITY_LABELS,
   MAX_FRIENDS,
   SESSION_CARDS,
+  WILD_META,
 } from './types';
-import type { CardCategory, GameMode, Intensity, Player, SessionConfig, SessionState, StoredNote } from './types';
+import type { Card, CardCategory, GameMode, Intensity, Player, SessionConfig, SessionState, StoredNote } from './types';
 import { BrandMark } from './components/BrandMark';
 import { Icon } from './components/Icons';
 import { OptionCard } from './components/OptionCard';
@@ -40,6 +43,7 @@ type SessionAction =
   | { type: 'answer' }
   | { type: 'skip' }
   | { type: 'soften' }
+  | { type: 'theme'; category: CardCategory }
   | { type: 'pause' }
   | { type: 'resume' }
   | { type: 'finish' };
@@ -52,6 +56,7 @@ const sessionReducer = (state: SessionState | null, action: SessionAction): Sess
     case 'answer': return answerCurrentCard(state);
     case 'skip': return skipCard(state);
     case 'soften': return softenCurrentCard(state);
+    case 'theme': return chooseTheme(state, action.category);
     case 'pause': return pauseSession(state);
     case 'resume': return resumeSession(state);
     case 'finish': return finishSession(state);
@@ -75,6 +80,18 @@ const prefersReducedMotion = (): boolean =>
 
 const FLIP_MS = 270;
 
+/** Cada comodín suena distinto para reconocerlo sin leerlo. */
+const soundForCard = (card: Card | null): SoundName => {
+  if (!card || card.kind !== 'comodin') return 'answer';
+  switch (card.wild) {
+    case 'reversa': return 'reversa';
+    case 'salta': return 'salta';
+    case 'doble': return 'doble';
+    case 'tema': return 'tema';
+    default: return 'prenda';
+  }
+};
+
 function App() {
   const [screen, setScreen] = useState<Screen>('home');
   const [session, dispatch] = useReducer(sessionReducer, null);
@@ -83,6 +100,7 @@ function App() {
   const [setupIntensity, setSetupIntensity] = useState<Intensity>('profunda');
   const [adultEnabled, setAdultEnabled] = useState(false);
   const [adultGateOpen, setAdultGateOpen] = useState(false);
+  const [wildcardsEnabled, setWildcardsEnabled] = useState(false);
   const [friendCount, setFriendCount] = useState(4);
   const [names, setNames] = useState<Player[]>(initialNames);
   const [finishNote, setFinishNote] = useState('');
@@ -140,6 +158,7 @@ function App() {
       players,
       intensity: setupIntensity,
       adultEnabled: setupMode === 'pareja' ? adultEnabled : false,
+      wildcardsEnabled,
       totalCards: SESSION_CARDS,
     };
     const nextSession = drawNextCard(createSession(config));
@@ -195,6 +214,8 @@ function App() {
             intensity={setupIntensity}
             adultEnabled={adultEnabled}
             adultGateOpen={adultGateOpen}
+            wildcardsEnabled={wildcardsEnabled}
+            onWildcardsToggle={() => { setWildcardsEnabled((current) => !current); playSound(wildcardsEnabled ? 'toggle' : 'comodin'); }}
             names={names}
             friendCount={friendCount}
             onModeChange={updateMode}
@@ -216,10 +237,11 @@ function App() {
             session={session}
             soundEnabled={soundEnabled}
             onToggleSound={toggleSounds}
-            onReveal={() => playSound('reveal')}
-            onNext={() => { playSound('answer'); dispatch({ type: 'answer' }); }}
+            onReveal={(isWild) => playSound(isWild ? 'comodin' : 'reveal')}
+            onNext={() => { playSound(soundForCard(session.currentCard)); dispatch({ type: 'answer' }); }}
             onSkip={() => { playSound('skip'); dispatch({ type: 'skip' }); }}
             onSoften={() => { playSound('soften'); dispatch({ type: 'soften' }); }}
+            onTheme={(category) => { playSound('tema'); dispatch({ type: 'theme', category }); }}
             onPause={() => { playSound('pause'); dispatch({ type: 'pause' }); goTo('pause'); }}
           />
         ) : <HomeScreen onStart={startNewSession} onGuide={() => goTo('guide')} onSettings={() => goTo('settings')} />;
@@ -314,6 +336,8 @@ interface SetupProps {
   intensity: Intensity;
   adultEnabled: boolean;
   adultGateOpen: boolean;
+  wildcardsEnabled: boolean;
+  onWildcardsToggle: () => void;
   names: Player[];
   friendCount: number;
   onModeChange: (mode: GameMode) => void;
@@ -369,6 +393,19 @@ function SetupScreen(props: SetupProps) {
             </div>
           </fieldset>
 
+          <div className={`wild-toggle${props.wildcardsEnabled ? ' is-enabled' : ''}`}>
+            <div>
+              <span className="wild-toggle__badge" aria-hidden="true">★</span>
+              <span>
+                <strong>Modo comodín</strong>
+                <small>{props.wildcardsEnabled ? 'Cuatro cartas sorpresa repartidas al azar en la partida.' : 'Reversa, saltos, retos y prendas entre las preguntas.'}</small>
+              </span>
+            </div>
+            <button type="button" onClick={props.onWildcardsToggle} aria-pressed={props.wildcardsEnabled}>
+              {props.wildcardsEnabled ? 'Activado' : 'Activar'}
+            </button>
+          </div>
+
           {props.mode === 'pareja' && (
             <>
               <div className={`adult-toggle${props.adultEnabled ? ' is-enabled' : ''}`}>
@@ -400,7 +437,28 @@ function GuideScreen({ onBack, onStart }: { onBack: () => void; onStart: () => v
       <section className="guide-hero"><span className="eyebrow eyebrow--with-dot"><span className="eyebrow-dot" />No es un examen</span><h1>Jugar es<br /><em>escucharnos.</em></h1><p>Entre nos está hecho para que una pregunta abra otra. No hay respuestas correctas, ni historias demasiado pequeñas.</p></section>
       <section className="guide-section"><div className="section-heading"><span className="section-index">01</span><div><span className="eyebrow">Los seis caminos</span><h2>Cada color mira una parte distinta de la vida.</h2></div></div><div className="category-guide-grid">{(Object.keys(CATEGORY_META) as CardCategory[]).map((category, index) => { const meta = CATEGORY_META[category]; return <article key={category} className="category-guide-card" style={{ '--card-accent': meta.color } as React.CSSProperties}><span className="category-guide-card__number">0{index + 1}</span><span className="category-guide-card__dot" /><h3>{meta.label}</h3><p>{meta.description}</p></article>; })}</div></section>
       <section className="guide-section guide-section--dark"><div className="section-heading"><span className="section-index section-index--light">02</span><div><span className="eyebrow eyebrow--light">Tres momentos</span><h2>Una partida que se abre, se queda y se lleva algo consigo.</h2></div></div><div className="act-list">{ACT_META.map((act, index) => <div className="act-row" key={act.label}><span>0{index + 1}</span><strong>{act.label}</strong><p>{act.description}</p></div>)}</div></section>
-      <section className="guide-section guide-section--agreements"><div className="section-heading"><span className="section-index">03</span><div><span className="eyebrow">El acuerdo más importante</span><h2>El cuidado también es parte del juego.</h2></div></div><div className="agreement-grid"><div><Icon name="pause-circle" size={21} /><strong>Pueden pausar</strong><p>El ritmo lo decide quien necesita respirar.</p></div><div><Icon name="arrow-right" size={21} /><strong>Pueden pasar</strong><p>No responder también es una respuesta válida.</p></div><div><Icon name="heart" size={21} /><strong>Pueden volver</strong><p>Lo compartido merece cuidado después de la partida.</p></div></div></section>
+      <section className="guide-section guide-section--wilds">
+        <div className="section-heading">
+          <span className="section-index">03</span>
+          <div><span className="eyebrow">Opcional</span><h2>El modo comodín cambia las reglas a mitad de la ronda.</h2></div>
+        </div>
+        <p className="guide-lead">Se activa antes de empezar. Reparte cuatro cartas sorpresa al azar entre las preguntas: no gastan turno, solo lo desordenan.</p>
+        <div className="wild-guide-grid">
+          {(Object.keys(WILD_META) as (keyof typeof WILD_META)[])
+            .filter((wild, index, all) => all.indexOf(wild) === index)
+            .map((wild) => {
+              const meta = WILD_META[wild];
+              return (
+                <article key={wild} className="wild-guide-card" style={{ '--card-accent': meta.color } as React.CSSProperties}>
+                  <span className="wild-guide-card__symbol" aria-hidden="true">{meta.symbol}</span>
+                  <strong>{meta.label}</strong>
+                  <small>{meta.family === 'mecanica' ? 'Altera el turno' : 'Prenda para el grupo'}</small>
+                </article>
+              );
+            })}
+        </div>
+      </section>
+      <section className="guide-section guide-section--agreements"><div className="section-heading"><span className="section-index">04</span><div><span className="eyebrow">El acuerdo más importante</span><h2>El cuidado también es parte del juego.</h2></div></div><div className="agreement-grid"><div><Icon name="pause-circle" size={21} /><strong>Pueden pausar</strong><p>El ritmo lo decide quien necesita respirar.</p></div><div><Icon name="arrow-right" size={21} /><strong>Pueden pasar</strong><p>No responder también es una respuesta válida.</p></div><div><Icon name="heart" size={21} /><strong>Pueden volver</strong><p>Lo compartido merece cuidado después de la partida.</p></div></div></section>
       <div className="guide-cta"><p>¿Listos para abrir una pregunta?</p><button type="button" className="primary-button" onClick={onStart}>Preparar una partida <Icon name="arrow-right" size={17} /></button></div>
     </div>
   );
@@ -410,14 +468,15 @@ interface GameProps {
   session: SessionState;
   soundEnabled: boolean;
   onToggleSound: () => void;
-  onReveal: () => void;
+  onReveal: (isWild: boolean) => void;
   onNext: () => void;
   onSkip: () => void;
   onSoften: () => void;
+  onTheme: (category: CardCategory) => void;
   onPause: () => void;
 }
 
-function GameScreen({ session, soundEnabled, onToggleSound, onReveal, onNext, onSkip, onSoften, onPause }: GameProps) {
+function GameScreen({ session, soundEnabled, onToggleSound, onReveal, onNext, onSkip, onSoften, onTheme, onPause }: GameProps) {
   const [revealed, setRevealed] = useState(false);
   const [flipping, setFlipping] = useState(false);
   const flipTimer = useRef<number | null>(null);
@@ -425,7 +484,8 @@ function GameScreen({ session, soundEnabled, onToggleSound, onReveal, onNext, on
   const progress = getSessionProgress(session);
   const act = getCurrentAct(session);
   const player = session.config.players[session.turnIndex];
-  const currentMeta = card ? CATEGORY_META[card.category] : CATEGORY_META.cercania;
+  const wild = card?.wild ? WILD_META[card.wild] : null;
+  const accent = wild ? wild.color : CATEGORY_META[card?.category ?? 'cercania'].color;
 
   useEffect(() => {
     setRevealed(false);
@@ -438,7 +498,7 @@ function GameScreen({ session, soundEnabled, onToggleSound, onReveal, onNext, on
 
   const revealCard = () => {
     if (revealed || flipping) return;
-    onReveal();
+    onReveal(Boolean(wild));
     if (prefersReducedMotion()) {
       setRevealed(true);
       return;
@@ -451,11 +511,111 @@ function GameScreen({ session, soundEnabled, onToggleSound, onReveal, onNext, on
   };
 
   if (!card) return null;
+
+  const renderActions = () => {
+    if (!revealed) {
+      return (
+        <div className="game-actions game-actions--mystery">
+          <span>La respuesta puede esperar. La curiosidad también.</span>
+          <button type="button" className="ghost-button" onClick={onSkip}><Icon name="arrow-right" size={15} /> Pasar sin verla</button>
+        </div>
+      );
+    }
+
+    if (card.wild === 'tema') {
+      return (
+        <div className="game-actions theme-picker">
+          <span className="theme-picker__label">Elige el tema de la siguiente carta</span>
+          <div className="theme-picker__grid">
+            {(Object.keys(CATEGORY_META) as CardCategory[]).map((category) => (
+              <button
+                key={category}
+                type="button"
+                className="theme-chip"
+                style={{ '--chip': CATEGORY_META[category].color } as React.CSSProperties}
+                onClick={() => onTheme(category)}
+              >
+                <span className="theme-chip__dot" />{CATEGORY_META[category].label}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    if (wild) {
+      return (
+        <div className="game-actions">
+          <button type="button" className="primary-button primary-button--large" onClick={onNext}>
+            {wild.family === 'mecanica' ? 'Aplicar comodín' : 'Hecho'} <Icon name="arrow-right" size={17} />
+          </button>
+          <div className="secondary-actions">
+            <button type="button" className="ghost-button" onClick={onSkip}><Icon name="arrow-right" size={15} /> Saltarse el comodín</button>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="game-actions">
+        <button type="button" className="primary-button primary-button--large" onClick={onNext}>Listo, siguiente <Icon name="arrow-right" size={17} /></button>
+        <div className="secondary-actions">
+          <button type="button" className="ghost-button" onClick={onSkip}><Icon name="arrow-right" size={15} /> Pasar esta carta</button>
+          <button type="button" className="ghost-button" onClick={onSoften}><Icon name="leaf" size={15} /> Algo más suave</button>
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <div className="game-page page-enter" style={{ '--active-accent': currentMeta.color } as React.CSSProperties}>
-      <header className="game-header"><BrandMark compact /><div className="game-header__center"><span className="act-label">Acto {session.actIndex + 1} · {act.label}</span><div className="progress-track" aria-label={`${progress}% respondido`}><span style={{ width: `${progress}%` }} /></div></div><div className="game-header__actions"><button type="button" className="sound-button" onClick={onToggleSound} aria-label={soundEnabled ? 'Desactivar sonidos' : 'Activar sonidos'}><Icon name={soundEnabled ? 'volume-on' : 'volume-off'} size={17} /><span>{soundEnabled ? 'Sonido' : 'Silencio'}</span></button><button type="button" className="pause-button" onClick={onPause}><Icon name="pause" size={15} /> Pausar</button></div></header>
-      <div className="game-context"><span className="game-context__mode">{session.config.mode === 'pareja' ? 'Pareja' : `${session.config.players.length} personas`}</span><span className="game-context__count">Carta {session.cardsPlayed + 1} de {session.config.totalCards}</span></div>
-      <main className="game-main"><div className="turn-message"><span className="turn-message__dot" /><span>Ahora responde <strong>{player?.name || 'la siguiente persona'}</strong></span><span className="turn-message__hint">{session.config.players.length > 2 ? 'Pásale el teléfono cuando terminen.' : 'Tómense todo el tiempo que necesiten.'}</span></div><PromptCard key={card.id} card={card} targetName={player?.name || 'ustedes'} cardNumber={session.cardsPlayed + 1} revealed={revealed} flipping={flipping} onReveal={revealCard} />{revealed ? <div className="game-actions"><button type="button" className="primary-button primary-button--large" onClick={onNext}>Listo, siguiente <Icon name="arrow-right" size={17} /></button><div className="secondary-actions"><button type="button" className="ghost-button" onClick={onSkip}><Icon name="arrow-right" size={15} /> Pasar esta carta</button><button type="button" className="ghost-button" onClick={onSoften}><Icon name="leaf" size={15} /> Algo más suave</button></div></div> : <div className="game-actions game-actions--mystery"><span>La respuesta puede esperar. La curiosidad también.</span><button type="button" className="ghost-button" onClick={onSkip}><Icon name="arrow-right" size={15} /> Pasar sin verla</button></div>}</main>
+    <div className={`game-page page-enter${wild && revealed ? ' game-page--wild' : ''}`} style={{ '--active-accent': accent } as React.CSSProperties}>
+      <header className="game-header">
+        <BrandMark compact />
+        <div className="game-header__center">
+          <span className="act-label">Acto {session.actIndex + 1} · {act.label}</span>
+          <div className="progress-track" aria-label={`${progress}% respondido`}><span style={{ width: `${progress}%` }} /></div>
+        </div>
+        <div className="game-header__actions">
+          <button type="button" className="sound-button" onClick={onToggleSound} aria-label={soundEnabled ? 'Desactivar sonidos' : 'Activar sonidos'}>
+            <Icon name={soundEnabled ? 'volume-on' : 'volume-off'} size={17} /><span>{soundEnabled ? 'Sonido' : 'Silencio'}</span>
+          </button>
+          <button type="button" className="pause-button" onClick={onPause}><Icon name="pause" size={15} /> Pausar</button>
+        </div>
+      </header>
+
+      <div className="game-context">
+        <span className="game-context__mode">{session.config.mode === 'pareja' ? 'Pareja' : `${session.config.players.length} personas`}</span>
+        <span className="game-context__count">
+          {session.config.wildcardsEnabled && <span className="game-context__wilds">★ {session.wildsPlayed}</span>}
+          Carta {session.cardsPlayed + 1} de {session.config.totalCards}
+        </span>
+      </div>
+
+      <main className="game-main">
+        <div className="turn-message">
+          <span className="turn-message__dot" />
+          {wild && revealed
+            ? <span>Comodín para <strong>{player?.name || 'quien sigue'}</strong></span>
+            : <span>Ahora responde <strong>{player?.name || 'la siguiente persona'}</strong></span>}
+          <span className="turn-message__hint">
+            {wild && revealed
+              ? 'Este no cuenta como carta. Es un regalo de la suerte.'
+              : session.config.players.length > 2
+                ? 'Pásale el teléfono cuando terminen.'
+                : 'Tómense todo el tiempo que necesiten.'}
+          </span>
+        </div>
+        <PromptCard
+          key={card.id}
+          card={card}
+          targetName={player?.name || 'ustedes'}
+          cardNumber={session.cardsPlayed + 1}
+          revealed={revealed}
+          flipping={flipping}
+          onReveal={revealCard}
+        />
+        {renderActions()}
+      </main>
     </div>
   );
 }
