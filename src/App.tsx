@@ -376,7 +376,7 @@ function SetupScreen(props: SetupProps) {
                 <button type="button" onClick={props.adultEnabled ? () => undefined : props.onAdultRequest}>{props.adultEnabled ? 'Activada' : 'Desbloquear'}</button>
               </div>
               {props.adultEnabled && props.intensity === 'suave' && (
-                <p className="adult-hint"><Icon name="info" size={13} /> En intensidad <strong>Suave</strong> las cartas 18+ se quedan fuera. Elige <strong>Profunda</strong> o <strong>Íntima</strong> para que aparezcan.</p>
+                <p className="adult-hint"><Icon name="info" size={13} /><span>En intensidad <strong>Suave</strong> las cartas 18+ se quedan fuera. Elige <strong>Profunda</strong> o <strong>Íntima</strong> para que aparezcan.</span></p>
               )}
             </>
           )}
